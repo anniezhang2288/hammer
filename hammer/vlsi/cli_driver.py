@@ -712,6 +712,7 @@ class CLIDriver:
                 else:
                     post_load_func_checked(driver)
                 assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
+                legacy_hammer.forget_stage_records(driver, "syn", driver.syn_tool.run_dir)
                 success, output = driver.run_synthesis(
                         driver.syn_tool.get_tool_hooks() + \
                         driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
@@ -733,6 +734,7 @@ class CLIDriver:
                 else:
                     post_load_func_checked(driver)
                 assert driver.par_tool is not None, "load_par_tool was unsuccessful"
+                legacy_hammer.forget_stage_records(driver, "par", driver.par_tool.run_dir)
                 success, output = driver.run_par(
                         driver.par_tool.get_tool_hooks() + \
                         driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
@@ -1099,6 +1101,8 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.drc_tool is not None, "load_drc_tool was unsuccessful"
+                    if legacy:
+                        legacy_hammer.forget_stage_records(driver, "drc", driver.drc_tool.run_dir)
                     success, output = driver.run_drc(
                             driver.drc_tool.get_tool_hooks() + \
                             driver.tech.get_tech_drc_hooks(driver.drc_tool.name) + \
@@ -1138,6 +1142,8 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.lvs_tool is not None, "load_lvs_tool was unsuccessful"
+                    if legacy:
+                        legacy_hammer.forget_stage_records(driver, "lvs", driver.lvs_tool.run_dir)
                     success, output = driver.run_lvs(
                             driver.lvs_tool.get_tool_hooks() + \
                             driver.tech.get_tech_lvs_hooks(driver.lvs_tool.name) + \

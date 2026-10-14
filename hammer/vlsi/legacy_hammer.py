@@ -4,7 +4,10 @@ The other build systems only choose what `buildfile` writes. "hammer" writes the
 as "make" and also makes every hammer-vlsi action behave like upstream Hammer: make, or whoever
 calls the action, decides that it runs, and it runs the tool. There is no dependency check or
 master_database.json, PD cache, sub-step resume or checkpoint streaming, error scan, LVS report
-verdict, time-saved ledger, RTL/collateral/code fingerprinting, or Postgres connection.
+verdict, time-saved ledger, RTL/collateral/code fingerprinting, or Postgres connection. It never
+creates master_database.json; if an earlier run under another build_system left one, each stage this
+mode reruns is marked needs-rerun in it (forget_stage_records), so switching back cannot skip to this
+mode's outputs.
 
 CLIDriver.run_main_parsed calls `apply` as soon as the config is loaded. It forces the SledgeHammer
 switches below to their legacy values in os.environ, over anything the user exported, so children
@@ -18,6 +21,7 @@ stage's output (par-input.json, par-output-full.json, ...) plus whatever configs
 it, so after switching vlsi.core.build_system, rerun from syn.
 """
 import contextlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence
@@ -98,6 +102,37 @@ def apply(driver: Any) -> bool:
         driver.log.warning(f"vlsi.core.build_system is hammer, so these exported SledgeHammer switches "
                            f"are ignored: {', '.join(overridden)}.")
     return True
+
+
+def forget_stage_records(driver: Any, stage: str, run_dir: str) -> None:
+    """Stop an earlier SledgeHammer run's records from vouching for a rundir this run is about to rewrite.
+
+    hammer mode never creates master_database.json or a resume marker, but a build dir that ran under
+    another build_system first still has them. Once build_system is switched back they would describe
+    this run's rundir as the earlier one: the dependency check skips the stage and returns this run's
+    outputs for the earlier inputs, and sub-step resume can start from this run's checkpoints. So mark
+    the stage needs-rerun in an existing master database and remove the rundir's resume marker.
+    Creates nothing and never raises.
+    """
+    from hammer.vlsi.substep_resume import MARKER_NAME
+    master = Path(driver.obj_dir) / "master_database.json"
+    try:
+        if master.is_file():
+            contents = json.loads(master.read_text())
+            if isinstance(contents, dict) and contents.get(f"{stage}.needsToRerun") is not True:
+                contents[f"{stage}.needsToRerun"] = True
+                tmp = master.with_name(f"{master.name}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(contents, sort_keys=True, indent=4, separators=(',', ': ')))
+                os.replace(tmp, master)
+    except (OSError, ValueError) as e:
+        driver.log.warning(f"Could not mark {stage} needs-rerun in {master} ({e}). Rerun {stage} with "
+                           f"--force if you switch vlsi.core.build_system back from hammer.")
+    try:
+        os.unlink(os.path.join(run_dir, MARKER_NAME))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        driver.log.warning(f"Could not remove the resume marker in {run_dir} ({e}).")
 
 
 @contextlib.contextmanager
