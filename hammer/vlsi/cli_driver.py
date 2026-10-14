@@ -1078,7 +1078,20 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
             elif action_type == "drc":
-                if legacy or driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
+                run_stage = legacy or driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun)
+                if not run_stage:
+                    # Unchanged: return the saved drc-output.json, as syn and par do. If the rundir
+                    # was wiped there is nothing to return, so run DRC again.
+                    pre_tool_config = driver.database.get_database_json()
+                    if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
+                        return None
+                    skipped = self._skip_path_output(driver, "drc", driver.drc_tool.run_dir, "drc",
+                                                     post_run_func_checked, restore=False)
+                    if skipped is not None:
+                        return skipped
+                    driver.log.warning("drc is unchanged, but drc-output.json is missing; running drc.")
+                    run_stage = driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = True, config_json = pre_tool_config)
+                if run_stage:
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
                         if not legacy:
                             driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
@@ -1104,10 +1117,20 @@ class CLIDriver:
                     if driver.dump_history:
                         dump_config_to_yaml_file(os.path.join(driver.drc_tool.run_dir, "drc-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
-                else:
-                    return 0
             elif action_type == "lvs":
-                if legacy or driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
+                run_stage = legacy or driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun)
+                if not run_stage:
+                    # Unchanged: return the saved lvs-output.json (see drc above).
+                    pre_tool_config = driver.database.get_database_json()
+                    if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
+                        return None
+                    skipped = self._skip_path_output(driver, "lvs", driver.lvs_tool.run_dir, "lvs",
+                                                     post_run_func_checked, restore=False)
+                    if skipped is not None:
+                        return skipped
+                    driver.log.warning("lvs is unchanged, but lvs-output.json is missing; running lvs.")
+                    run_stage = driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json", force = True, config_json = pre_tool_config)
+                if run_stage:
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
                         if not legacy:
                             driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
@@ -1154,8 +1177,6 @@ class CLIDriver:
                     if driver.dump_history:
                         dump_config_to_yaml_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
-                else:
-                    return 0
             elif action_type == "sram_generator":
                 if not driver.load_sram_generator_tool(get_or_else(self.sram_generator_rundir, "")):
                     return None
@@ -1804,15 +1825,17 @@ class CLIDriver:
         return output_full
 
     def _skip_path_output(self, driver: HammerDriver, stage_tag: str, run_dir: str, prefix: str,
-                          post_run: Callable[[HammerDriver], None]) -> Optional[dict]:
+                          post_run: Callable[[HammerDriver], None], restore: bool = True) -> Optional[dict]:
         """
         Output of a stage skipped as unchanged, restoring its rundir from the PD cache if it is gone.
         Refreshes <prefix>-output-full.json from the current project config, since the bridges build
         the next stage's input from it. Returns None when <prefix>-output.json is missing or unreadable.
+        restore=False skips the cache lookup, for stages the PD cache never stores (drc, lvs).
         """
         from hammer.vlsi.pd_cache import try_restore_from_cache
         output_name = f"{prefix}-output.json"
-        try_restore_from_cache(driver, stage_tag, rundir=run_dir, output_filename=output_name)
+        if restore:
+            try_restore_from_cache(driver, stage_tag, rundir=run_dir, output_filename=output_name)
         output_path = os.path.join(run_dir, output_name)
         if not os.path.exists(output_path):
             return None
