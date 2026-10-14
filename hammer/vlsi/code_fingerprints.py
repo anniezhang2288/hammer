@@ -66,6 +66,7 @@ _INFRA_FILES: Tuple[str, ...] = (
     "vlsi/hammer_build_systems.py",
     "vlsi/sledge_settings.py",
     "vlsi/legacy_hammer.py",
+    "vlsi/design_share.py",
 )
 
 _TOOL_SIDE_PACKAGES: Tuple[str, ...] = ("vlsi/vendor",)

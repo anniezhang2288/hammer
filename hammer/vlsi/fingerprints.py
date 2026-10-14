@@ -3,8 +3,9 @@ Fingerprints of what a stage's result depends on beyond its config values: the f
 libraries and decks name, inputs in the build dir, and tool, hook and framework code.
 
 Every file becomes one line. A file under a content root (the tech cache, the build dir, the
-hammer package) is named by a portable token and hashed by content, so the same bytes in another
-build dir give the same line and a rewrite with identical bytes changes nothing; one too big to
+hammer package, the directory the action runs from) is named by a portable token and hashed by
+content, so the same bytes in another build dir, or in a partner's pulled copy of the design, give
+the same line and a rewrite with identical bytes changes nothing; one too big to
 hash gives its size and whole-second mtime, which a PD cache restore keeps. Any other file is
 hashed by path, size, mtime and ctime, which keeps multi-GB PDK files cheap.
 """
@@ -63,16 +64,33 @@ def hammer_dir() -> str:
     return str(Path(hammer.vlsi.__file__).resolve().parent.parent)
 
 
+def _forms(path: str) -> Tuple[str, str]:
+    return os.path.normpath(os.path.abspath(path)), os.path.realpath(path)
+
+
 def make_roots(tech_cache: Optional[str], obj_dir: Optional[str],
-               hammer_root: Optional[str] = None) -> List[Tuple[str, str]]:
-    """(prefix ending in a separator, token) pairs in normpath and realpath form, longest first."""
+               hammer_root: Optional[str] = None, work_dir: Optional[str] = None) -> List[Tuple[str, str]]:
+    """(prefix ending in a separator, token) pairs in normpath and realpath form, longest first.
+
+    work_dir, the directory the action runs from (make's and the DAG's working directory), is a root
+    too, so a partner who pulls the design into a directory of their own names its RTL, configs and
+    collateral by the same tokens and hits the same cache entries. It is left out when it is /, the
+    home directory, or inside another root, where it would hide that root's token.
+    """
     pairs = set()
     for path, token in ((tech_cache, "<TECH_CACHE>"), (obj_dir, "<OBJ_DIR>"),
                         (hammer_root if hammer_root is not None else hammer_dir(), "<HAMMER>")):
         if not path:
             continue
-        for form in (os.path.normpath(os.path.abspath(path)), os.path.realpath(path)):
+        for form in _forms(path):
             pairs.add((form.rstrip(os.sep) + os.sep, token))
+    if work_dir:
+        forms = _forms(work_dir)
+        too_broad = {os.sep} | set(_forms(os.path.expanduser("~")))
+        inside = any((form.rstrip(os.sep) + os.sep).startswith(prefix) for form in forms for prefix, _ in pairs)
+        if not inside and not too_broad.intersection(forms):
+            for form in forms:
+                pairs.add((form.rstrip(os.sep) + os.sep, "<WORK_DIR>"))
     return sorted(pairs, key=lambda p: (-len(p[0]), p[0]))
 
 
@@ -84,7 +102,11 @@ def path_roots(driver: Any) -> List[Tuple[str, str]]:
             tech_cache = tech.cache_dir
         except (ValueError, AttributeError):
             tech_cache = None
-    return make_roots(tech_cache, getattr(driver, "obj_dir", None))
+    try:
+        work_dir: Optional[str] = os.getcwd()
+    except OSError:
+        work_dir = None
+    return make_roots(tech_cache, getattr(driver, "obj_dir", None), work_dir=work_dir)
 
 
 def _match(path: str, roots: Roots) -> Optional[str]:

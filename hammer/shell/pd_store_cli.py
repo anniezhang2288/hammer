@@ -36,6 +36,13 @@ Design registration (turn RTL into Hammer configs without hand-writing YAML):
     augment --design <n>            (fill in SRAM stuff for an existing design)
     make-dag --design <n>           (generate the Airflow DAG and link it in)
 
+Design sharing (build a partner's design yourself, starting from their cache):
+    share   <design> <partner...>   Publish your design's files and let these partners pull them.
+    unshare <design> <partner>      Stop a partner pulling it.
+    publish <design>                Upload your design's current files again (syn does this itself).
+    shares                          Designs you shared, and designs shared with you.
+    pull    <owner> <design>        Fetch a shared design and generate your own DAG for it.
+
 `<path>` defaults to ./master_database.json when omitted.
 
 Connection settings come from HAMMER_PG_* env vars, or fall back to
@@ -1104,6 +1111,124 @@ def _cmd_cache_events_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shared_dag_file(design: str, obj_dir: Optional[str]) -> str:
+    """The DAG that builds the caller's design: <obj_dir>/hammer_dag.py, else the registered one."""
+    from hammer.vlsi import design_share
+    if obj_dir:
+        path = os.path.join(os.path.abspath(obj_dir), "hammer_dag.py")
+        if not os.path.isfile(path):
+            raise design_share.ShareError(f"{obj_dir} has no hammer_dag.py; run make buildfile there first.")
+        return path
+    import getpass
+    from hammer.shell.sledgehammer_cli import _dags_folder
+    folder, src = _dags_folder()
+    path = os.path.join(folder, f"sledgehammer_{design}_{getpass.getuser()}.py")
+    if not os.path.isfile(path):
+        raise design_share.ShareError(f"no DAG registered for {design} in {folder} (from {src}). Pass "
+                                      f"--obj-dir <build dir>, or run make buildfile first.")
+    return path
+
+
+def _publish_design(design: str, obj_dir: Optional[str]):
+    """Bundle the caller's design from its DAG and upload it. Returns (owner, bundle, uploaded)."""
+    from hammer.vlsi import design_share
+    bundle = design_share.bundle_from_dag(_shared_dag_file(design, obj_dir), owner=pd_store.current_db_user())
+    if bundle.manifest["design"] != design:
+        raise design_share.ShareError(f"that DAG builds {bundle.manifest['design']!r}, not {design!r}.")
+    uploaded = pd_store.publish_design_bundle(design, bundle.manifest, bundle.data, bundle.bundle_sha)
+    return bundle.manifest["owner"], bundle, uploaded
+
+
+def _print_bundle(design: str, bundle, uploaded: bool) -> None:
+    files, size = len(bundle.manifest["files"]), len(bundle.data)
+    print(f"{'Published' if uploaded else 'Already up to date:'} {design}: {files} file(s), "
+          f"{size / 1e6:.1f} MB compressed.")
+    external = bundle.manifest["external"]
+    if external:
+        print(f"  {len(external)} path(s) outside your checkout (PDK, tools) are not copied; partners need them "
+              f"at the same place.")
+
+
+def _cmd_share(args: argparse.Namespace) -> int:
+    from hammer.vlsi import design_share
+    try:
+        owner, bundle, uploaded = _publish_design(args.design, args.obj_dir)
+        for partner in args.partners:
+            pd_store.share_design(args.design, partner)
+    except (design_share.ShareError, ValueError) as e:
+        print(f"studio share: {e}", file=sys.stderr)
+        return 2
+    _print_bundle(args.design, bundle, uploaded)
+    print(f"Shared {args.design} with {', '.join(args.partners)}. They run:  studio pull {owner} {args.design}")
+    print("Your syn runs publish it again whenever its files change.")
+    return 0
+
+
+def _cmd_unshare(args: argparse.Namespace) -> int:
+    n = pd_store.unshare_design(args.design, args.partner)
+    if not n:
+        print(f"{args.design} was not shared with {args.partner}.", file=sys.stderr)
+        return 1
+    print(f"{args.partner} can no longer pull {args.design}.")
+    return 0
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    from hammer.vlsi import design_share
+    try:
+        _, bundle, uploaded = _publish_design(args.design, args.obj_dir)
+    except design_share.ShareError as e:
+        print(f"studio publish: {e}", file=sys.stderr)
+        return 2
+    _print_bundle(args.design, bundle, uploaded)
+    return 0
+
+
+def _cmd_shares(args: argparse.Namespace) -> int:
+    me = pd_store.current_db_user()
+    rows = pd_store.list_design_shares()
+    mine = [r for r in rows if r["owner"] == me]
+    theirs = [r for r in rows if r["owner"] != me]
+
+    def updated(r) -> str:
+        t = r["bundle_updated_at"]
+        return t.strftime("%Y-%m-%d %H:%M") if hasattr(t, "strftime") else "not published"
+
+    print("Shared by you:" if mine else "You have not shared any design.")
+    for r in mine:
+        print(f"  {r['design']:32s} with {r['grantee']:16s} bundle {updated(r)}")
+    print("Shared with you:" if theirs else "Nobody has shared a design with you.")
+    for r in theirs:
+        print(f"  {r['design']:32s} from {r['owner']:16s} bundle {updated(r)}   studio pull {r['owner']} {r['design']}")
+    return 0
+
+
+def _cmd_pull(args: argparse.Namespace) -> int:
+    from hammer.vlsi import design_share
+    into = args.into or f"{args.design}-from-{args.owner}"
+    try:
+        summary = design_share.pull(args.owner, args.design, into, env_configs=args.env or None,
+                                    force=args.force, build=not args.no_dag)
+    except design_share.ShareError as e:
+        print(f"studio pull: {e}", file=sys.stderr)
+        return 2
+    print(f"Pulled {args.owner}'s {args.design} into {summary['work_dir']} ({summary['files']} file(s)).")
+    if summary["hammer_mismatch"]:
+        print(f"WARNING: {summary['hammer_mismatch']}")
+    missing = summary["missing_external"]
+    if missing:
+        print(f"WARNING: {len(missing)} path(s) the design uses outside {args.owner}'s checkout do not exist here, "
+              f"so stages that read them will fail:")
+        for p in missing[:10]:
+            print(f"  {p}")
+    if summary["dag_file"]:
+        print(f"Generated your DAG {summary['dag_id']}. Once Airflow picks it up (about 30 s), run it from there:")
+        print(f"  cd {summary['work_dir']}")
+        print("  sledgehammer run syn par")
+        print(f"syn and par restore {args.owner}'s cached results instead of running the tools when nothing differs.")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="studio",
@@ -1438,6 +1563,44 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Override the design directory path.")
     p_aug.set_defaults(func=_cmd_augment)
 
+    p_share = sub.add_parser(
+        "share", help="Publish your design's files and let these partners pull them.")
+    p_share.add_argument("design", help="Design name: your build dir's basename, as in sledgehammer_<design>_<you>.")
+    p_share.add_argument("partners", nargs="+", help="Each partner's Postgres role (their username).")
+    p_share.add_argument("--obj-dir", default=None,
+                         help="Build dir whose hammer_dag.py to share (default: your registered DAG).")
+    p_share.set_defaults(func=_cmd_share)
+
+    p_unshare = sub.add_parser("unshare", help="Stop a partner pulling one of your designs.")
+    p_unshare.add_argument("design")
+    p_unshare.add_argument("partner")
+    p_unshare.set_defaults(func=_cmd_unshare)
+
+    p_publish = sub.add_parser(
+        "publish", help="Upload your shared design's current files again (each syn run does this itself).")
+    p_publish.add_argument("design")
+    p_publish.add_argument("--obj-dir", default=None,
+                           help="Build dir whose hammer_dag.py to publish (default: your registered DAG).")
+    p_publish.set_defaults(func=_cmd_publish)
+
+    p_shares = sub.add_parser("shares", help="List designs you shared and designs shared with you.")
+    p_shares.set_defaults(func=_cmd_shares)
+
+    p_pull = sub.add_parser(
+        "pull", help="Fetch a design a partner shared with you and generate your own DAG for it.")
+    p_pull.add_argument("owner", help="The partner who shared it (their Postgres role).")
+    p_pull.add_argument("design")
+    p_pull.add_argument("--into", default=None,
+                        help="Directory to build it in (default: ./<design>-from-<owner>). Pulling again "
+                             "updates it to the partner's latest.")
+    p_pull.add_argument("--env", action="append", default=[],
+                        help="Use this env config instead of the partner's (repeatable). Settings that differ "
+                             "change the cache keys, so expect misses.")
+    p_pull.add_argument("--force", action="store_true",
+                        help="Write into a non-empty directory that no earlier pull made.")
+    p_pull.add_argument("--no-dag", action="store_true", help="Fetch the files only; do not generate a DAG.")
+    p_pull.set_defaults(func=_cmd_pull)
+
     p_dag = sub.add_parser(
         "make-dag",
         help="Generate an Airflow DAG for an existing design and symlink it "
@@ -1732,6 +1895,14 @@ def main(argv: List[str] | None = None) -> int:
         print(f"studio: database unavailable: {lines[0]}", file=sys.stderr)
         for line in lines[1:]:
             print(f"  {line}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        if getattr(e, "pgcode", None) != "42P01":
+            raise
+        # undefined_table: this Hammer knows tables (design sharing, say) the database was never given
+        table = re.search(r'"([^"]+)"', str(e))
+        print(f"studio: the database has no {table.group(1) if table else 'such'} table yet. A database admin "
+              f"runs `studio init` once after upgrading Hammer to create it.", file=sys.stderr)
         return 1
 
 

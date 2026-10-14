@@ -256,6 +256,18 @@ def _content_line(path: str, roots: Any, memo: Dict[str, str]) -> Optional[str]:
     return line if line.startswith("<") else None
 
 
+def _work_dir_line(path: str, roots: Any) -> Optional[str]:
+    """A directory or missing path under the working directory, named by its token. Its files are keyed
+    where the config walks it (include dirs, collateral dirs), and a partner's pulled copy of the design
+    puts it at the same place relative to theirs, so its absolute location must not split the key."""
+    tok = fingerprints.tokenize(path, roots, resolve=False)
+    if tok is None or not tok.startswith("<WORK_DIR>/"):
+        return None
+    if os.path.isdir(path):
+        return f"DIR:{tok}"
+    return None if os.path.lexists(path) else f"MISSING:{tok}"
+
+
 def _rtl_token(path: str, roots: Any) -> Optional[str]:
     """The bare root token of an RTL file under a content root, whose content vlsi.rtl_fingerprint_sha256 covers."""
     tok = fingerprints.tokenize(path, roots, resolve=False)
@@ -264,7 +276,8 @@ def _rtl_token(path: str, roots: Any) -> Optional[str]:
 
 def _normalize_roots(value: Any, roots: Any, memo: Dict[str, str], seen: Dict[str, Optional[str]]) -> Any:
     """A copy of value for hashing in which a regular file under a content root becomes its content line, or
-    the entry seen already holds for it, while directories and missing paths stay absolute."""
+    the entry seen already holds for it, while directories and missing paths stay absolute except under the
+    working directory, where they become their token."""
     if isinstance(value, str):
         if not roots or "/" not in value and os.sep not in value:
             return value
@@ -274,7 +287,7 @@ def _normalize_roots(value: Any, roots: Any, memo: Dict[str, str], seen: Dict[st
             if not os.path.isabs(part):
                 continue
             if part not in seen:
-                seen[part] = _content_line(part, roots, memo)
+                seen[part] = _content_line(part, roots, memo) or _work_dir_line(part, roots)
             if seen[part] is not None:
                 parts[i] = seen[part]
         return "".join(parts)
@@ -351,6 +364,39 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
     return pd_store.compute_stage_key(db, stage_tag)
 
 
+# Written into a rundir before it is stored: the working directory the stage ran from, so a restore
+# elsewhere (a partner's pulled copy of the design) can point paths into it at its own.
+ORIGIN_MARKER = ".pd_cache_origin.json"
+
+
+def _current_dir() -> Optional[str]:
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
+def _stored_work_dir(rundir_path: Path, orig_obj: Optional[str], new_obj: str) -> Optional[str]:
+    """The working directory a blob was stored from: its origin marker, else (blobs from before the marker)
+    the stored obj_dir placed where this obj_dir sits under the current working directory."""
+    try:
+        work = json.loads((rundir_path / ORIGIN_MARKER).read_text()).get("work_dir")
+        if isinstance(work, str) and os.path.isabs(work):
+            return work
+    except (OSError, ValueError, AttributeError):
+        pass
+    cwd = _current_dir()
+    if orig_obj is None or cwd is None:
+        return None
+    for c in {os.path.normpath(cwd), os.path.realpath(cwd)}:
+        for o in {os.path.normpath(new_obj), os.path.realpath(new_obj)}:
+            if o.startswith(c.rstrip(os.sep) + os.sep):
+                rel = o[len(c.rstrip(os.sep)) + 1:]
+                if orig_obj.endswith("/" + rel):
+                    return orig_obj[:-len(rel) - 1]
+    return None
+
+
 def _rebase_restored_paths(rundir_path: Path, output_filename: str,
                            info=None, stored_name: Optional[str] = None) -> int:
     """Point a restored rundir's json outputs at the dir it was restored into.
@@ -363,7 +409,10 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
     paths themselves: the prefix before the rundir's name in the blob
     (``stored_name``, by default this rundir's own name). Rewrite it to the
     current obj_dir, and the stored rundir to this one, in every top-level
-    json of the rundir. Returns the number of files changed. When the paths
+    json of the rundir. Paths into the working directory the blob was stored
+    from (the RTL and configs a partner pulled into a directory of their own)
+    are pointed at the current working directory the same way. Returns the
+    number of files changed. When the paths
     cannot be rewritten, or a rundir restored under a new name is a symlink,
     holds a symlinked top-level json or has no path under its stored name, it
     removes the output json (or the symlinked rundir itself) and raises, so
@@ -386,25 +435,34 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
         prefixes: Dict[str, int] = {}
         for m in re.finditer(r'"((?:/[^"/]+)+)/' + re.escape(stored) + r'/', text):
             prefixes[m.group(1)] = prefixes.get(m.group(1), 0) + 1
-        if not prefixes:
-            if stored != name:
-                raise ValueError(f"{output_filename} has no path under the stored rundir {stored}")
-            return 0
-        orig = max(prefixes, key=prefixes.get)
-        same_dir = orig == new_dir or os.path.realpath(orig) == os.path.realpath(new_dir)
-        if same_dir and stored == name:
+        if not prefixes and stored != name:
+            raise ValueError(f"{output_filename} has no path under the stored rundir {stored}")
+        orig = max(prefixes, key=prefixes.get) if prefixes else None
+        same_dir = orig is None or orig == new_dir or os.path.realpath(orig) == os.path.realpath(new_dir)
+        obj_moves = not (same_dir and stored == name)
+        orig_work = _stored_work_dir(rundir_path, orig, new_dir)
+        cwd = _current_dir()
+        work_moves = (orig_work is not None and cwd is not None
+                      and os.path.realpath(orig_work) != os.path.realpath(cwd))
+        if not obj_moves and not work_moves:
             return 0
         # only whole-path matches: /a/build/ChipTop must not touch /a/build/ChipTop-iso
-        pat = re.compile(re.escape(orig) + r'(/' + re.escape(stored) + r')?(?=/|["\s,\]])')
+        pat = re.compile(re.escape(orig) + r'(/' + re.escape(stored) + r')?(?=/|["\s,\]])') if obj_moves else None
+        work_pat = re.compile(re.escape(orig_work) + r'(?=/|["\s,\]])') if work_moves else None
         changed = 0
         for jf in rundir_path.glob("*.json"):
             s = jf.read_text()
-            t = pat.sub(lambda m: f"{new_dir}/{name}" if m.group(1) else new_dir, s)
+            t = s
+            if pat is not None:
+                t = pat.sub(lambda m: f"{new_dir}/{name}" if m.group(1) else new_dir, t)
+            if work_pat is not None:
+                t = work_pat.sub(lambda m: cwd, t)
             if t != s:
                 jf.write_text(t)
                 changed += 1
         if changed:
-            info(f"PD cache: restored {name} was stored from {orig}/{stored}; "
+            info(f"PD cache: restored {name} was stored from {orig or new_dir}/{stored}"
+                 f"{f' (working directory {orig_work})' if work_moves else ''}; "
                  f"rewrote {changed} json file(s) to {rundir_path}")
         return changed
     except Exception as e:
@@ -581,6 +639,12 @@ def cache_or_run(
                     json.dump(output, f, cls=HammerJSONEncoder, indent=4)
             except Exception as e:
                 _warn(f"PD cache: could not pre-write {output_filename} ({e}); tarball may lack it.")
+            cwd = _current_dir()
+            if cwd is not None:
+                try:
+                    (Path(rundir) / ORIGIN_MARKER).write_text(json.dumps({"work_dir": cwd}) + "\n")
+                except OSError as e:
+                    _warn(f"PD cache: could not record where {stage_tag} ran ({e}).")
 
             # store cost = tarring/compressing the rundir + uploading the blob
             # to Postgres. This is the one-time overhead SledgeHammer pays on a

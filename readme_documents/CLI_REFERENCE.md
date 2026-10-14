@@ -10,7 +10,7 @@ step in a normal flow that requires it.
 | Command | Purpose |
 |---|---|
 | **`sledgehammer`** | Launch the Airflow stack; run flows from the CLI; Airflow passthrough |
-| **`studio`** | Admin + cache CLI for the shared PD database (43 subcommands) |
+| **`studio`** | Admin + cache CLI for the shared PD database (45 subcommands) |
 | `hammer-vlsi` | Hammer's flow driver (syn, par, drc, lvs, build, ...) |
 | `get-config` | Print a resolved config key |
 | `hammer-generate-mdf` | Generate a macro definition file |
@@ -259,6 +259,17 @@ never fires.
 ```bash
 studio init            # create the schema on a fresh database
 studio reap            # list EDA processes left by dead runs (--kill to end them)
+```
+
+### Design sharing
+
+`share` `unshare` `publish` `shares` `pull` — run a partner's design on your own DAG, starting from
+their cache. See [DESIGN_SHARING.md](DESIGN_SHARING.md).
+
+```bash
+studio share ChipTop bob            # owner: publish the design's files, let bob pull them
+studio pull alice ChipTop           # partner: fetch into ./ChipTop-from-alice and generate a DAG
+cd ChipTop-from-alice && sledgehammer run syn par   # restores alice's syn and par from the cache
 ```
 
 ## Related documents

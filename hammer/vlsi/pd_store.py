@@ -105,6 +105,13 @@ __all__ = [
     "count_cache_events",
     "clear_cache_events",
     "set_cache_event_project",
+    "current_db_user",
+    "publish_design_bundle",
+    "fetch_design_bundle",
+    "share_design",
+    "unshare_design",
+    "design_has_shares",
+    "list_design_shares",
 ]
 
 
@@ -149,6 +156,18 @@ BLOB_CHUNK_BYTES = 128 * 1024 * 1024
 CHECKPOINT_MAX_BYTES = 4 * 1024 * 1024 * 1024
 CHECKPOINT_CHUNK_TABLE = "pd_checkpoint_chunks"
 FQ_CHECKPOINT_CHUNK = f"{SCHEMA_NAME}.{CHECKPOINT_CHUNK_TABLE}"
+
+# Design sharing (studio share / studio pull). A bundle is the compressed set of files a partner needs
+# to build one design locally: its configs, RTL and the collateral they name. One row per (owner,
+# design) holds the latest; a share row lets one other Postgres role read it. Row-level security, not
+# the client, decides who sees which bundle, so a teammate in sledgehammer_users still cannot read a
+# design nobody shared with them.
+DESIGN_BUNDLE_TABLE = "pd_design_bundles"
+FQ_DESIGN_BUNDLE = f"{SCHEMA_NAME}.{DESIGN_BUNDLE_TABLE}"
+DESIGN_BUNDLE_CHUNK_TABLE = "pd_design_bundle_chunks"
+FQ_DESIGN_BUNDLE_CHUNK = f"{SCHEMA_NAME}.{DESIGN_BUNDLE_CHUNK_TABLE}"
+DESIGN_SHARE_TABLE = "pd_design_shares"
+FQ_DESIGN_SHARE = f"{SCHEMA_NAME}.{DESIGN_SHARE_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -732,6 +751,82 @@ CREATE TABLE IF NOT EXISTS {FQ_CHECKPOINT_CHUNK} (
     data      BYTEA NOT NULL,
     PRIMARY KEY (stage_key, step, seq)
 );
+
+-- Design sharing. The latest bundle of each (owner, design): its configs, RTL and the collateral they
+-- name, tarred and gzipped, with a JSON manifest. Bundles past one bytea's practical size spill into
+-- pd_design_bundle_chunks, as pd_blobs does.
+CREATE TABLE IF NOT EXISTS {FQ_DESIGN_BUNDLE} (
+    owner       TEXT NOT NULL DEFAULT current_user,
+    design      TEXT NOT NULL,
+    bundle_sha  TEXT NOT NULL,
+    manifest    JSONB NOT NULL,
+    data        BYTEA NOT NULL,
+    size_bytes  BIGINT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner, design)
+);
+CREATE TABLE IF NOT EXISTS {FQ_DESIGN_BUNDLE_CHUNK} (
+    owner  TEXT NOT NULL DEFAULT current_user,
+    design TEXT NOT NULL,
+    seq    INT NOT NULL,
+    data   BYTEA NOT NULL,
+    PRIMARY KEY (owner, design, seq)
+);
+-- Who may pull which design: one row per (owner, design, grantee). The owner adds and removes them.
+CREATE TABLE IF NOT EXISTS {FQ_DESIGN_SHARE} (
+    owner      TEXT NOT NULL DEFAULT current_user,
+    design     TEXT NOT NULL,
+    grantee    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner, design, grantee)
+);
+
+-- The database, not the client, enforces sharing. Each user connects as their own role; an owner reads
+-- and writes only their own rows, and a grantee can only read a bundle whose owner shared that design
+-- with them. FORCE holds the table owner (whoever ran studio init) to the same rules.
+ALTER TABLE {FQ_DESIGN_SHARE} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {FQ_DESIGN_SHARE} FORCE ROW LEVEL SECURITY;
+ALTER TABLE {FQ_DESIGN_BUNDLE} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {FQ_DESIGN_BUNDLE} FORCE ROW LEVEL SECURITY;
+ALTER TABLE {FQ_DESIGN_BUNDLE_CHUNK} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {FQ_DESIGN_BUNDLE_CHUNK} FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_SHARE_TABLE}' AND policyname = 'design_shares_owner') THEN
+        CREATE POLICY design_shares_owner ON {FQ_DESIGN_SHARE} FOR ALL
+            USING (owner = current_user) WITH CHECK (owner = current_user);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_SHARE_TABLE}' AND policyname = 'design_shares_grantee') THEN
+        CREATE POLICY design_shares_grantee ON {FQ_DESIGN_SHARE} FOR SELECT
+            USING (grantee = current_user);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_BUNDLE_TABLE}' AND policyname = 'design_bundles_owner') THEN
+        CREATE POLICY design_bundles_owner ON {FQ_DESIGN_BUNDLE} FOR ALL
+            USING (owner = current_user) WITH CHECK (owner = current_user);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_BUNDLE_TABLE}' AND policyname = 'design_bundles_shared') THEN
+        CREATE POLICY design_bundles_shared ON {FQ_DESIGN_BUNDLE} FOR SELECT
+            USING (EXISTS (SELECT 1 FROM {FQ_DESIGN_SHARE} s
+                           WHERE s.owner = {DESIGN_BUNDLE_TABLE}.owner AND s.design = {DESIGN_BUNDLE_TABLE}.design
+                             AND s.grantee = current_user));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_BUNDLE_CHUNK_TABLE}' AND policyname = 'design_bundle_chunks_owner') THEN
+        CREATE POLICY design_bundle_chunks_owner ON {FQ_DESIGN_BUNDLE_CHUNK} FOR ALL
+            USING (owner = current_user) WITH CHECK (owner = current_user);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = '{SCHEMA_NAME}'
+                   AND tablename = '{DESIGN_BUNDLE_CHUNK_TABLE}' AND policyname = 'design_bundle_chunks_shared') THEN
+        CREATE POLICY design_bundle_chunks_shared ON {FQ_DESIGN_BUNDLE_CHUNK} FOR SELECT
+            USING (EXISTS (SELECT 1 FROM {FQ_DESIGN_SHARE} s
+                           WHERE s.owner = {DESIGN_BUNDLE_CHUNK_TABLE}.owner
+                             AND s.design = {DESIGN_BUNDLE_CHUNK_TABLE}.design AND s.grantee = current_user));
+    END IF;
+END $$;
 
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -2379,6 +2474,142 @@ def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = 
                     (sk, st))
         conn.commit()
     return n
+
+
+# --- Design sharing (studio share / studio pull) -------------------------------
+# Every query below runs as the caller's own role, and the row-level security in _DDL decides what it
+# can see: its own bundles and shares, plus bundles of designs shared with it. A design nobody shared
+# with the caller is indistinguishable from one that does not exist.
+
+def current_db_user() -> str:
+    """The Postgres role this process connects as, which owns what it publishes and shares."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            return str(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def publish_design_bundle(design: str, manifest: Dict[str, Any], data: bytes, bundle_sha: str) -> bool:
+    """Store the caller's latest bundle of ``design``. False when the stored bundle already has
+    ``bundle_sha``, so an unchanged design is not uploaded again."""
+    chunks = [data[i:i + BLOB_CHUNK_BYTES] for i in range(0, len(data), BLOB_CHUNK_BYTES)]
+    inline = data if len(chunks) <= 1 else b""
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT bundle_sha FROM {FQ_DESIGN_BUNDLE} WHERE owner = current_user AND design = %s",
+                        (design,))
+            row = cur.fetchone()
+            if row is not None and row[0] == bundle_sha:
+                conn.commit()
+                return False
+            cur.execute(
+                f"""
+                INSERT INTO {FQ_DESIGN_BUNDLE} (design, bundle_sha, manifest, data, size_bytes)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (owner, design) DO UPDATE
+                  SET bundle_sha = EXCLUDED.bundle_sha,
+                      manifest   = EXCLUDED.manifest,
+                      data       = EXCLUDED.data,
+                      size_bytes = EXCLUDED.size_bytes,
+                      updated_at = NOW()
+                """,
+                (design, bundle_sha, Json(manifest), psycopg2.Binary(inline), len(data)))
+            cur.execute(f"DELETE FROM {FQ_DESIGN_BUNDLE_CHUNK} WHERE owner = current_user AND design = %s",
+                        (design,))
+            if len(chunks) > 1:
+                for seq, chunk in enumerate(chunks):
+                    cur.execute(f"INSERT INTO {FQ_DESIGN_BUNDLE_CHUNK} (design, seq, data) VALUES (%s, %s, %s)",
+                                (design, seq, psycopg2.Binary(chunk)))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def fetch_design_bundle(owner: str, design: str) -> Optional[Dict[str, Any]]:
+    """``owner``'s latest bundle of ``design`` as {manifest, data, bundle_sha, updated_at}, or None when it
+    does not exist or was not shared with the caller."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT manifest, data, bundle_sha, updated_at FROM {FQ_DESIGN_BUNDLE} "
+                f"WHERE owner = %s AND design = %s", (owner, design))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            data = bytes(row[1]) if row[1] is not None else b""
+            if not data:
+                cur.execute(
+                    f"SELECT data FROM {FQ_DESIGN_BUNDLE_CHUNK} WHERE owner = %s AND design = %s ORDER BY seq",
+                    (owner, design))
+                data = b"".join(bytes(c[0]) for c in cur.fetchall())
+    finally:
+        conn.close()
+    return {"manifest": row[0], "data": data, "bundle_sha": row[2],
+            "updated_at": row[3].isoformat() if hasattr(row[3], "isoformat") else row[3]}
+
+
+def share_design(design: str, grantee: str) -> None:
+    """Let ``grantee`` pull the caller's bundles of ``design``."""
+    _valid_role(grantee)
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {FQ_DESIGN_SHARE} (design, grantee) VALUES (%s, %s) "
+                        f"ON CONFLICT (owner, design, grantee) DO NOTHING", (design, grantee))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unshare_design(design: str, grantee: str) -> int:
+    """Stop ``grantee`` pulling the caller's ``design``. Returns the number of shares removed."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_DESIGN_SHARE} WHERE owner = current_user AND design = %s "
+                        f"AND grantee = %s", (design, grantee))
+            n = cur.rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+def design_has_shares(design: str) -> bool:
+    """True when the caller has shared ``design`` with anyone."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {FQ_DESIGN_SHARE} WHERE owner = current_user AND design = %s LIMIT 1",
+                        (design,))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def list_design_shares() -> List[Dict[str, Any]]:
+    """Every share the caller can see (its own, and those naming it as grantee), with the bundle's age and
+    size."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT s.owner, s.design, s.grantee, s.created_at, b.updated_at, b.size_bytes "
+                f"FROM {FQ_DESIGN_SHARE} s LEFT JOIN {FQ_DESIGN_BUNDLE} b "
+                f"ON b.owner = s.owner AND b.design = s.design ORDER BY s.owner, s.design, s.grantee")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    keys = ("owner", "design", "grantee", "shared_at", "bundle_updated_at", "size_bytes")
+    return [dict(zip(keys, row)) for row in rows]
 
 
 def tar_directory(path: Path, arcname: Optional[str] = None) -> bytes:

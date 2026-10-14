@@ -923,6 +923,12 @@ class CLIDriver:
                     if driver.dump_history:
                         dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
+                    # A shared design republishes its bundle when its files changed, so a partner's next
+                    # pull gets the RTL and configs this run's cache entries were made from.
+                    from hammer.vlsi import design_share
+                    note = design_share.republish_if_shared(driver)
+                    if note:
+                        driver.log.info(f"Design sharing: {note}.")
             elif action_type == "par":
                 run_stage = driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control)
                 if not run_stage:

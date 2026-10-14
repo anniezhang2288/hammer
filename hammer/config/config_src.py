@@ -842,6 +842,9 @@ RUN_CONTROL_KEYS = frozenset({
     "vlsi.error_scan.enabled", "vlsi.error_scan.ignore", "vlsi.error_scan.fail_on",
     "vlsi.core.airflow_dags_folder", "vlsi.core.airflow_dag_id",
     "vlsi.core.airflow_edge", "vlsi.core.airflow_queue",
+    # Which generator writes the build file (make, a DAG, or legacy hammer) never changes what a
+    # stage produces; a partner's pulled build sets it differently from the owner's.
+    "vlsi.core.build_system",
 })
 
 

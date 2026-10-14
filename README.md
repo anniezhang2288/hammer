@@ -24,6 +24,7 @@ For a deeper dive into available options and environment configuration:
   * [Database and cache setup](readme_documents/DATABASE_SETUP.md), [PD store / studio CLI](readme_documents/PD_STORE_README.md)
   * [Secrets](readme_documents/SECRETS.md), [LDAP login](readme_documents/AIRFLOW_LDAP_SETUP.md), [two-factor auth](readme_documents/AIRFLOW_2FA_SETUP.md)
   * [Sub-step resume and checkpoints](readme_documents/SUBSTEP_RESUME.md), [time-saved tracker](readme_documents/TIME_SAVED_TRACKER.md)
+  * [Running a partner's design](readme_documents/DESIGN_SHARING.md) from their cache (`studio share` / `studio pull`)
   * [Chipyard integration](readme_documents/setup-sledgehammer-chipyard.md)
 * For CAD tool settings, please see the relevant `defaults.yml` for those plugins.
 
