@@ -797,6 +797,7 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         # Check that the par outputs exist if the par run was successful
         self.output_gds = self.output_gds_filename
         self.output_netlist = self.output_netlist_filename
+        self.output_physical_netlist = self.output_physical_netlist_filename
         self.output_sim_netlist = self.output_sim_netlist_filename
         self.hcells_list = []
         self.sdf_file = self.output_sdf_path

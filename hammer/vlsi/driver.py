@@ -1172,7 +1172,12 @@ class HammerDriver:
                  or None if output_dict was invalid
         """
         try:
-            input_files = deeplist([output_dict.get("par.outputs.output_physical_netlist", output_dict["par.outputs.output_netlist"])])
+            # Prefer the physical netlist when the par tool wrote one. Par outputs from before it was
+            # optional recorded a missing one as the string "None".
+            physical_netlist = output_dict.get("par.outputs.output_physical_netlist")
+            if physical_netlist in (None, "", "None"):
+                physical_netlist = output_dict["par.outputs.output_netlist"]
+            input_files = deeplist([physical_netlist])
             result = {
                 "timing.inputs.input_files": input_files,
                 "timing.inputs.input_files_meta": "append",
