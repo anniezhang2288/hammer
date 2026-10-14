@@ -119,7 +119,12 @@ def _load_secrets() -> None:
 # The stage names the generated DAGs accept as trigger-conf booleans.
 _STAGES = ("sim_rtl", "power_rtl", "syn", "sim_syn", "timing_syn", "formal_syn",
            "power_syn", "par", "sim_par", "timing_par", "formal_par",
-           "power_par", "drc", "lvs")
+           "power_par", "drc", "lvs", "pcb")
+
+
+def _shown(task_id):
+    """Whether run streaming and status list a task: the stages (in module groups, and pcb) and the mail."""
+    return task_id.startswith("module_") or task_id in ("pcb", "notify_")
 
 
 _FOREIGN_LIB_MARKERS = ("conda", "miniforge", "mamba", "pixi")
@@ -300,6 +305,15 @@ def _dag_supports_forceall(dag_file):
         return True
 
 
+def _dag_has_pcb(dag_file):
+    """True if the generated DAG has the pcb task (it knows the 'pcb' Param)."""
+    try:
+        with open(dag_file) as f:
+            return "'pcb': Param" in f.read()
+    except OSError:
+        return True
+
+
 def _dags_for_cwd(dags_folder, user):
     """[(design, obj_dir)] for registered DAGs that build under the cwd or were generated from it.
 
@@ -441,6 +455,10 @@ def _cmd_run(args) -> int:
             f"  Both builds are named {design}, and only the one generated last is registered.\n"
             f"  Regenerate the DAG from {obj_dir} (make buildfile) to switch to it.")
 
+    if "pcb" in actions and not _dag_has_pcb(dag_file):
+        sys.exit(f"[sledgehammer] {dag_file} predates the pcb stage, so asking it for pcb would run "
+                 f"nothing. Regenerate it (make buildfile), or run make pcb.")
+
     _airflow("dags", "unpause", dag_id)
     conf = {s: True for s in actions}
     if a.module:
@@ -484,7 +502,7 @@ def _cmd_run(args) -> int:
             for t, s in sorted(_task_states(dag_id, run_id).items()):
                 if not s or s == "skipped" or last.get(t) == s:
                     continue
-                if t.startswith("module_") or t in ("notify_",):
+                if _shown(t):
                     print(f"  [{time.strftime('%H:%M')}] "
                           f"{t.replace('module_', ''):42s} {s}")
                 last[t] = s
@@ -531,7 +549,7 @@ def _cmd_status(args, list_only=False) -> int:
         state = next((r[2] for r in rows if r[1] == rid), "?")
         print(f"{dag_id}  run {rid}: {state}")
         for t, s in sorted(_task_states(dag_id, rid).items()):
-            if s and s != "skipped" and (t.startswith("module_") or t == "notify_"):
+            if s and s != "skipped" and _shown(t):
                 print(f"  {t.replace('module_', ''):44s} {s}")
     return 0
 

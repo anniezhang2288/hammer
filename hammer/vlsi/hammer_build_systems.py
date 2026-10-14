@@ -1095,6 +1095,19 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                 flags += ["-p", ps]
             flags += ["-o", syn_deps]
             run_hammer_action("hier-par-to-syn", flags)
+
+        @task(task_id="pcb")
+        def pcb(**context):
+            # PCB deliverables (bump footprint, pin map, schematic symbol) for the board designer. Like
+            # hammer.d's pcb target it reads only the project configs, never another stage's outputs,
+            # so it is one task for the whole design, not one per module.
+            if should_run_stage('pcb', context):
+                flags = []
+                for p in _selected_proj_configs(context):
+                    flags += ["-p", p]
+                run_hammer_action("pcb", flags)
+            else:
+                raise AirflowSkipException("pcb task skipped")
     """)
 
     # 3. Parameter Inputs & Unique DAG Skeleton Generation
@@ -1130,6 +1143,7 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         'timing_par': Param(default=False, type='boolean', title='Timing Place and Route'),
         'formal_par': Param(default=False, type='boolean', title='Formal Place and Route'),
         'power_par': Param(default=False, type='boolean', title='Power Place and Route'),
+        'pcb': Param(default=False, type='boolean', title='PCB Deliverables'),
         'modules': Param(default=['all'], type='array', examples={module_examples!r}, title='Modules',
                          description='Run the selected stages on these modules only (default: all).'),
         'tools': Param(default=DEFAULT_TOOLS, type='string', enum=TOOLS_CHOICES, title='Tools config'),
@@ -1300,6 +1314,11 @@ def hammer_dag():
     summary_node = cache_summary_()
     exit_node = exit_()
     notify_node = notify_()
+
+    # pcb needs only the configs, so it starts with the first stages, and a failed pcb fails the run
+    # like any stage.
+    pcb_node = pcb()
+    start_node >> pcb_node >> [summary_node, exit_node]
 """
 
     # 4. Programmatic Inter-Module Routing Map

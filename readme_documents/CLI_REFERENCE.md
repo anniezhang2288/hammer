@@ -128,7 +128,9 @@ sledgehammer run syn --obj_dir build/ChipTop --no-wait
 ```
 
 Stages: `sim_rtl power_rtl syn sim_syn timing_syn formal_syn power_syn par
-sim_par timing_par formal_par power_par drc lvs` (dashes accepted).
+sim_par timing_par formal_par power_par drc lvs pcb` (dashes accepted). `pcb`
+writes the board deliverables (bump footprint, pin map, schematic symbol) from
+the configs alone, so it runs once for the whole design, alongside the first stages.
 
 | Flag | Meaning |
 |---|---|
@@ -285,6 +287,7 @@ instead of things you type.
 | `make par` (chains syn) | `sledgehammer par` |
 | `make all` | `sledgehammer run syn par` |
 | `make drc` then `make lvs` | `sledgehammer run drc lvs` *(parallel)* |
+| `make pcb` | `sledgehammer pcb` |
 | `make syn-RocketTile` | `sledgehammer syn-RocketTile` |
 | `make par-RocketTile` | `sledgehammer par-RocketTile` |
 | `make redo-syn-RocketTile` | `sledgehammer redo-syn-RocketTile` |
