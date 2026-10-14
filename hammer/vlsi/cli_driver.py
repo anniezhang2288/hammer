@@ -687,8 +687,14 @@ class CLIDriver:
                             "to restore the elaborated-design fingerprint.")
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
             except FileNotFoundError as e:
-                driver.log.error(f"RTL file not found: {e.filename}")
-                return None
+                if action_type in ("synthesis", "syn"):
+                    driver.log.error(f"RTL file not found: {e.filename}")
+                    return None
+                # Only synthesis reads the RTL; later stages run from its outputs, as in upstream
+                # Hammer, so a cleaned or moved RTL tree must not stop them. Without the fingerprint
+                # the dependency check sees it change and reruns the stage rather than skipping it.
+                driver.log.warning(f"RTL file not found: {e.filename}. Running {action_type} "
+                                   "without the RTL fingerprint.")
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
                 return None
