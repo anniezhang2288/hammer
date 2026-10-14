@@ -460,10 +460,13 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
 
     from hammer.vlsi.hammer_build_systems import build_airflow_dag
     errs: List[str] = []
+    # The DAG's tasks run its HAMMER_EXEC as the Hammer driver. That defaults to this process's
+    # executable, which here is studio, so point it at the hammer-vlsi installed beside it.
     dep_graph = build_airflow_dag(
         driver, errs.append,
         proj_confs_by_tools=proj_confs_by_tools,
         default_tools=args.tools,
+        hammer_exec=os.path.join(os.path.dirname(sys.executable), "hammer-vlsi"),
     )
     for e in errs:
         print(f"WARNING: {e}", file=sys.stderr)

@@ -29,7 +29,8 @@ def build_noop(driver: HammerDriver, append_error_func: Callable[[str], None]) -
     return dependency_graph
 
 
-def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
+def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None],
+                   hammer_exec: Optional[str] = None) -> dict:
     #pdb.set_trace()    #[Trace Path 1]
     """
     Build a Makefile include in the obj_dir called hammer.d. This is intended to be dynamically
@@ -106,6 +107,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
           after_step options. An example use is "make redo-par-Top HAMMER_EXTRA_ARGS="-p patch.yaml --from_step placement".
 
     :param driver: The HammerDriver
+    :param hammer_exec: The Hammer driver the targets run. Defaults to the executable running this build.
     :return: The dependency graph
     """
     dependency_graph = driver.get_hierarchical_dependency_graph()
@@ -115,7 +117,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
     default_dependencies.extend(list(driver.database.get_setting("synthesis.inputs.input_files", [])))
     # Resolve the canonical path for each dependency
     default_dependencies = [os.path.realpath(x) for x in default_dependencies]
-    output = "HAMMER_EXEC ?= {}\n".format(os.path.realpath(sys.argv[0]))
+    output = "HAMMER_EXEC ?= {}\n".format(os.path.realpath(hammer_exec or sys.argv[0]))
     output += "HAMMER_DEPENDENCIES ?= {}\n\n".format(" ".join(default_dependencies))
     syn_deps = "$(HAMMER_DEPENDENCIES)"
     # Get the confs passed into this execution
@@ -533,13 +535,16 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
 # ---------------------------------------------------------------------------
 
 def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], None],
-                      proj_confs_by_tools=None, default_tools=None) -> dict:
+                      proj_confs_by_tools=None, default_tools=None, hammer_exec: Optional[str] = None) -> dict:
     # Emit hammer.d as well. Choosing the DAG should add a way to run the flow,
     # not take one away: projects document `make syn`, `make par-<block>` and
     # the redo- targets, and those come from the makefile include. Both
     # generators write their own file into obj_dir, so keeping the legacy one
     # costs nothing and leaves every existing command working.
-    build_makefile(driver, append_error_func)
+    # hammer_exec: the Hammer driver every task runs. It defaults to the executable running
+    # this build, which is right for `hammer-vlsi build` / `make buildfile`; a caller that is
+    # not itself a Hammer driver (studio make-dag) must pass one.
+    build_makefile(driver, append_error_func, hammer_exec=hammer_exec)
 
     dependency_graph = driver.get_hierarchical_dependency_graph()
     dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
@@ -550,7 +555,7 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     env_confs = [os.path.realpath(x) for x in driver.options.environment_configs]
     proj_confs = [os.path.realpath(x) for x in driver.options.project_configs]
     obj_dir = os.path.realpath(driver.obj_dir)
-    hammer_exec = os.path.realpath(sys.argv[0])
+    hammer_exec = os.path.realpath(hammer_exec or sys.argv[0])
     # Pin the exact interpreter that generated this DAG (the venv python).
     # The generated DAG invokes hammer as `[HAMMER_PY, HAMMER_EXEC, ...]` so
     # task subprocesses don't depend on the venv being on PATH -- Airflow
