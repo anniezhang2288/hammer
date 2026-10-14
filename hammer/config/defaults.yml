@@ -998,6 +998,9 @@ timing.inputs:
   sdf_file: null # Optional: Input SDF file
   # type: Optional[str]
 
+  def_file: null # Optional: Input DEF file from post-P&R.
+  # type: Optional[str]
+
   max_paths: 100 # Max paths to report
   # type: int
 
