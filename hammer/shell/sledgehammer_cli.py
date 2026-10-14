@@ -382,7 +382,8 @@ def _cmd_run(args) -> int:
     p.add_argument("--stop_after_step", "--to_step", "--to-step", dest="to_step")
     p.add_argument("--only_step", "--only-step", dest="only_step")
     p.add_argument("--steps_stage", "--steps-stage", dest="steps_stage",
-                   choices=["syn", "par"], default="syn")
+                   choices=["syn", "par"], default=None,
+                   help="stage the step flags apply to (default: the one of syn/par being run)")
     p.add_argument("--run-id")
     p.add_argument("--no-wait", action="store_true",
                    help="trigger and return; do not stream the run")
@@ -393,6 +394,14 @@ def _cmd_run(args) -> int:
     if bad:
         sys.exit(f"[sledgehammer] unknown stage(s): {', '.join(bad)}. "
                  f"Valid: {', '.join(_STAGES)}")
+    # The step flags drive one stage, syn or par. Default to the one being run, so
+    # `sledgehammer run par --from_step X` steps par instead of handing X to syn.
+    if (a.from_step or a.to_step or a.only_step) and a.steps_stage is None:
+        named = [s for s in ("syn", "par") if s in actions]
+        if len(named) != 1:
+            sys.exit("[sledgehammer] --from_step/--to_step/--only_step apply to one stage, syn or par. "
+                     "Say which with --steps-stage syn or --steps-stage par.")
+        a.steps_stage = named[0]
 
     user = getpass.getuser()
     dags_folder, dags_src = _dags_folder()
